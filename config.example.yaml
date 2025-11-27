@@ -1,0 +1,45 @@
+mode: pool
+log_level: info
+management:
+  enabled: true
+  listen: 0.0.0.0:9090
+  probe_target: www.apple.com:80
+listener:
+  address: 0.0.0.0
+  port: 2323
+  username: username
+  password: password
+pool:
+  mode: sequential
+  failure_threshold: 3
+  blacklist_duration: 24h
+multi_port:
+  address: 0.0.0.0
+  base_port: 24000
+  username: mpuser
+  password: mppass
+
+# ═══════════════════════════════════════════════════════════════
+# 节点配置方式（三选一或混合使用）
+# ═══════════════════════════════════════════════════════════════
+
+# 方式 1: 使用 nodes_file（推荐，最简单）
+# 创建一个文本文件，每行一个代理 URI
+# nodes_file: nodes.txt
+
+# 方式 2: 直接在配置文件中配置（传统方式）
+nodes:
+  # 只需提供 URI，名称会自动从 #后面提取，端口自动分配
+  - uri: "vless://uuid@server:443#节点名称"
+  - uri: "ss://base64@server:8388#🇨🇳中文节点"
+
+  # 也可以手动指定名称和端口
+  - name: tw-vless
+    uri: "vless://test"
+    port: 24001
+
+# 方式 3: 混合使用（两种方式的节点会合并）
+# nodes_file: nodes.txt
+# nodes:
+#   - uri: "vless://xxx@server:443#额外节点"
+

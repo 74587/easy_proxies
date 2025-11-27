@@ -1,0 +1,10 @@
+services:
+  easy-proxies:
+    image: ghcr.io/jasonwong1991/easy_proxies:latest
+    container_name: easy-proxies
+    restart: unless-stopped
+    ports:
+      - "2323:2323"
+      - "9090:9090"
+    volumes:
+      - ./config.yaml:/etc/easy-proxies/config.yaml:ro

@@ -1,7 +1,9 @@
 package pool
 
 import (
+	"bufio"
 	"context"
+	"fmt"
 	"math/rand"
 	"net"
 	"strings"
@@ -243,11 +245,10 @@ func (p *poolOutbound) probeAllMembersOnStartup() {
 
 	for _, member := range members {
 		// Create a timeout context for each probe
-		ctx, cancel := context.WithTimeout(p.ctx, 10*time.Second)
+		ctx, cancel := context.WithTimeout(p.ctx, 15*time.Second)
 
 		start := time.Now()
 		conn, err := member.outbound.DialContext(ctx, N.NetworkTCP, destination)
-		latency := time.Since(start)
 
 		if err != nil {
 			p.logger.Warn("initial probe failed for ", member.tag, ": ", err)
@@ -256,18 +257,33 @@ func (p *poolOutbound) probeAllMembersOnStartup() {
 				member.entry.RecordFailure(err)
 				member.entry.MarkInitialCheckDone(false) // 标记为不可用
 			}
-		} else {
-			_ = conn.Close()
-			latencyMs := latency.Milliseconds()
-			if latencyMs == 0 && latency > 0 {
-				latencyMs = 1 // Round up sub-millisecond latencies to 1ms
-			}
-			p.logger.Info("initial probe success for ", member.tag, ", latency: ", latencyMs, "ms")
-			availableCount++
+			cancel()
+			continue
+		}
+
+		// Perform HTTP probe to measure actual latency (TTFB)
+		_, err = httpProbe(conn, destination.AddrString())
+		conn.Close()
+
+		if err != nil {
+			p.logger.Warn("initial HTTP probe failed for ", member.tag, ": ", err)
+			failedCount++
 			if member.entry != nil {
-				member.entry.RecordSuccessWithLatency(latency) // 记录成功和延迟
-				member.entry.MarkInitialCheckDone(true)        // 标记为可用
+				member.entry.RecordFailure(err)
+				member.entry.MarkInitialCheckDone(false)
 			}
+			cancel()
+			continue
+		}
+
+		// Total latency = dial + HTTP probe
+		latency := time.Since(start)
+		latencyMs := latency.Milliseconds()
+		p.logger.Info("initial probe success for ", member.tag, ", latency: ", latencyMs, "ms")
+		availableCount++
+		if member.entry != nil {
+			member.entry.RecordSuccessWithLatency(latency)
+			member.entry.MarkInitialCheckDone(true)
 		}
 
 		cancel()
@@ -467,6 +483,42 @@ func (p *poolOutbound) makeReleaseFunc(member *memberState) func() {
 	}
 }
 
+// httpProbe performs an HTTP probe through the connection and measures TTFB.
+// It sends a minimal HTTP request and waits for the first byte of response.
+func httpProbe(conn net.Conn, host string) (time.Duration, error) {
+	// Build HTTP request
+	req := fmt.Sprintf("GET /generate_204 HTTP/1.1\r\nHost: %s\r\nConnection: close\r\nUser-Agent: Mozilla/5.0\r\n\r\n", host)
+
+	// Set write deadline
+	if err := conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		return 0, err
+	}
+
+	// Record time just before sending request
+	start := time.Now()
+
+	// Send HTTP request
+	if _, err := conn.Write([]byte(req)); err != nil {
+		return 0, fmt.Errorf("write request: %w", err)
+	}
+
+	// Set read deadline
+	if err := conn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		return 0, err
+	}
+
+	// Read first byte (TTFB - Time To First Byte)
+	reader := bufio.NewReader(conn)
+	_, err := reader.ReadByte()
+	if err != nil {
+		return 0, fmt.Errorf("read response: %w", err)
+	}
+
+	// Calculate TTFB
+	ttfb := time.Since(start)
+	return ttfb, nil
+}
+
 func (p *poolOutbound) makeProbeFunc(member *memberState) func(ctx context.Context) (time.Duration, error) {
 	if p.monitor == nil {
 		return nil
@@ -484,7 +536,18 @@ func (p *poolOutbound) makeProbeFunc(member *memberState) func(ctx context.Conte
 			}
 			return 0, err
 		}
-		_ = conn.Close()
+		defer conn.Close()
+
+		// Perform HTTP probe to measure actual latency (TTFB)
+		_, err = httpProbe(conn, destination.AddrString())
+		if err != nil {
+			if member.entry != nil {
+				member.entry.RecordFailure(err)
+			}
+			return 0, err
+		}
+
+		// Total duration = dial time + HTTP probe
 		duration := time.Since(start)
 		if member.entry != nil {
 			member.entry.RecordSuccessWithLatency(duration)
@@ -534,7 +597,18 @@ func (p *poolOutbound) makeProbeByTagFunc(tag string) func(ctx context.Context) 
 			}
 			return 0, err
 		}
-		_ = conn.Close()
+		defer conn.Close()
+
+		// Perform HTTP probe to measure actual latency (TTFB)
+		_, err = httpProbe(conn, destination.AddrString())
+		if err != nil {
+			if member.entry != nil {
+				member.entry.RecordFailure(err)
+			}
+			return 0, err
+		}
+
+		// Total duration = dial time + TTFB
 		duration := time.Since(start)
 		if member.entry != nil {
 			member.entry.RecordSuccessWithLatency(duration)

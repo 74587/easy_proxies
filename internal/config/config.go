@@ -80,10 +80,25 @@ type StickyConfig struct {
 }
 
 // PoolConfig configures scheduling + failure handling.
+//
+// Failures are split three ways: rate limiting (HTTP 429) uses RateLimitCooldown,
+// other transient faults (timeout / connection reset / 503) use TransientCooldown,
+// and permanent faults (handshake, cert, 404, …) still accumulate toward
+// FailureThreshold and then trigger the full BlacklistDuration.
 type PoolConfig struct {
 	Mode              string        `yaml:"mode"`
 	FailureThreshold  int           `yaml:"failure_threshold"`
 	BlacklistDuration time.Duration `yaml:"blacklist_duration"`
+	// TransientCooldown is how long a node is skipped after a transient failure
+	// (timeout, connection reset, 503). These errors usually clear on their own,
+	// so the node is briefly parked instead of counted toward the permanent
+	// blacklist. Default 60s when <= 0.
+	TransientCooldown time.Duration `yaml:"transient_cooldown,omitempty"`
+	// RateLimitCooldown is the cooldown applied when the upstream reports rate
+	// limiting (HTTP 429). Quota resets are typically far slower than a network
+	// blip, so this can be set much higher (e.g. 2h) than TransientCooldown.
+	// Falls back to the effective TransientCooldown when <= 0.
+	RateLimitCooldown time.Duration `yaml:"rate_limit_cooldown,omitempty"`
 	// RetryEnabled toggles automatic fail-over to another member when a dial fails.
 	// nil/unset → default true. Use *bool so users can explicitly disable via YAML.
 	RetryEnabled *bool `yaml:"retry_enabled,omitempty"`
@@ -327,6 +342,12 @@ func (c *Config) normalize() error {
 	}
 	if c.Pool.BlacklistDuration <= 0 {
 		c.Pool.BlacklistDuration = 24 * time.Hour
+	}
+	if c.Pool.TransientCooldown <= 0 {
+		c.Pool.TransientCooldown = 60 * time.Second
+	}
+	if c.Pool.RateLimitCooldown <= 0 {
+		c.Pool.RateLimitCooldown = c.Pool.TransientCooldown
 	}
 	if c.Pool.RetryAttempts <= 0 {
 		c.Pool.RetryAttempts = 3
@@ -661,6 +682,12 @@ func (c *Config) NormalizeWithPortMap(portMap map[string]uint16) error {
 	}
 	if c.Pool.BlacklistDuration <= 0 {
 		c.Pool.BlacklistDuration = 24 * time.Hour
+	}
+	if c.Pool.TransientCooldown <= 0 {
+		c.Pool.TransientCooldown = 60 * time.Second
+	}
+	if c.Pool.RateLimitCooldown <= 0 {
+		c.Pool.RateLimitCooldown = c.Pool.TransientCooldown
 	}
 	if c.Pool.RetryAttempts <= 0 {
 		c.Pool.RetryAttempts = 3

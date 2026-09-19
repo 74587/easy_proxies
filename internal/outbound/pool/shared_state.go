@@ -20,25 +20,41 @@ type sharedMemberState struct {
 	active           atomic.Int32
 }
 
-// transientCooldown is how long a node is skipped after a transient failure
-// (rate-limit / timeout / connection reset). Far shorter than the 24h blacklist
-// used for permanent faults, because these errors usually clear on their own —
-// e.g. a shared free node briefly rate-limited (HTTP 429) by its CDN.
-const transientCooldown = 60 * time.Second
+// failureKind classifies a dial failure so the caller can pick the right
+// recovery policy: a quota reset (429) usually needs far longer than a network
+// blip, and neither should count toward the permanent-blacklist threshold.
+type failureKind int
 
-// isTransientError reports whether err looks like a temporary condition that
-// should NOT count toward the permanent-blacklist threshold. Rate limiting
-// (429), timeouts and connection resets fall here: the node is likely alive and
-// will recover, so a full 24h ban would needlessly drain the healthy pool.
-func isTransientError(err error) bool {
+const (
+	faultPermanent failureKind = iota
+	faultTransient
+	faultRateLimit
+)
+
+// defaultTransientCooldown is the fallback cooldown when the policy leaves it
+// unset, preserving the historical hardcoded behaviour.
+const defaultTransientCooldown = 60 * time.Second
+
+// classifyFailure buckets err into one of the three failure kinds.
+//
+// Rate-limit markers are checked first: a 429 response body frequently also
+// mentions "timeout" or "try again", and the longer rate-limit cooldown must
+// win in that case. Everything unrecognised is treated as permanent, so real
+// faults (handshake/cert/protocol failures, 404, …) still accumulate toward
+// the blacklist threshold.
+func classifyFailure(err error) failureKind {
 	if err == nil {
-		return false
+		return faultPermanent
 	}
 	msg := strings.ToLower(err.Error())
 	switch {
 	case strings.Contains(msg, "429"),
 		strings.Contains(msg, "too many requests"),
-		strings.Contains(msg, "timeout"),
+		strings.Contains(msg, "rate limit"),
+		strings.Contains(msg, "ratelimit"),
+		strings.Contains(msg, "rate-limit"):
+		return faultRateLimit
+	case strings.Contains(msg, "timeout"),
 		strings.Contains(msg, "deadline exceeded"),
 		strings.Contains(msg, "connection reset"),
 		strings.Contains(msg, "reset by peer"),
@@ -46,9 +62,35 @@ func isTransientError(err error) bool {
 		strings.Contains(msg, "try again"),
 		strings.Contains(msg, "service unavailable"),
 		strings.Contains(msg, "503"):
-		return true
+		return faultTransient
 	}
-	return false
+	return faultPermanent
+}
+
+// failurePolicy bundles the tunables recordFailure needs. The zero value is
+// usable and behaves like the original hardcoded 60s cooldown.
+type failurePolicy struct {
+	Threshold         int
+	BlacklistDuration time.Duration
+	TransientCooldown time.Duration
+	RateLimitCooldown time.Duration
+}
+
+// cooldownFor resolves the pause to apply for kind, filling in defaults
+// defensively so an unset policy still behaves sanely. Permanent faults have
+// no cooldown of their own — they go through the threshold/blacklist path.
+func (p failurePolicy) cooldownFor(kind failureKind) time.Duration {
+	transient := p.TransientCooldown
+	if transient <= 0 {
+		transient = defaultTransientCooldown
+	}
+	if kind == faultRateLimit {
+		if p.RateLimitCooldown > 0 {
+			return p.RateLimitCooldown
+		}
+		return transient
+	}
+	return transient
 }
 
 var sharedStateStore sync.Map // map[tag]*sharedMemberState
@@ -94,46 +136,53 @@ func (s *sharedMemberState) entryHandle() *monitor.EntryHandle {
 
 // recordFailure records a failure and decides whether to blacklist the node.
 //
-// Transient errors (rate-limit 429, timeouts, connection resets) do NOT count
-// toward the permanent threshold; instead they impose a short cooldown so the
-// node is briefly skipped and then retried automatically. Permanent errors
-// (handshake/cert/protocol failures, 404, etc.) accumulate toward the threshold
-// and trigger the full blacklist duration once it is reached.
+// Rate-limit (429) and other transient errors (timeouts, connection resets, 503)
+// do NOT count toward the permanent threshold; instead they impose a cooldown —
+// sized per kind by policy — so the node is briefly skipped and then retried
+// automatically. Permanent errors (handshake/cert/protocol failures, 404, etc.)
+// accumulate toward the threshold and trigger the full blacklist duration once
+// it is reached.
 //
-// Returns: (current permanent-failure count, blacklisted, blacklist-until, transient).
-func (s *sharedMemberState) recordFailure(cause error, threshold int, duration time.Duration) (int, bool, time.Time, bool) {
-	transient := isTransientError(cause)
+// Returns: (current permanent-failure count, blacklisted, effective until, kind).
+func (s *sharedMemberState) recordFailure(cause error, policy failurePolicy) (int, bool, time.Time, failureKind) {
+	kind := classifyFailure(cause)
 
 	s.mu.Lock()
 	var count int
 	triggered := false
 	var until time.Time
-	if transient {
-		// Short cooldown only; do not accumulate toward the 24h blacklist.
-		count = s.failures
-		until = time.Now().Add(transientCooldown)
-		s.blacklisted = true
-		s.blacklistedUntil = until
-	} else {
+	if kind == faultPermanent {
 		s.failures++
 		count = s.failures
-		if s.failures >= threshold {
+		if s.failures >= policy.Threshold {
 			triggered = true
-			until = time.Now().Add(duration)
+			until = time.Now().Add(policy.BlacklistDuration)
 			s.failures = 0
-			s.blacklisted = true
-			s.blacklistedUntil = until
 		}
+	} else {
+		// Cooldown only; do not accumulate toward the long blacklist.
+		count = s.failures
+		until = time.Now().Add(policy.cooldownFor(kind))
+	}
+	if !until.IsZero() {
+		// Never let a short cooldown cut an already-running longer ban short:
+		// a 60s transient blip must not release a node mid-way through a 24h
+		// permanent blacklist. Keep whichever expiry is later.
+		if s.blacklisted && s.blacklistedUntil.After(until) {
+			until = s.blacklistedUntil
+		}
+		s.blacklisted = true
+		s.blacklistedUntil = until
 	}
 	s.mu.Unlock()
 
 	if entry := s.entry.Load(); entry != nil {
 		entry.RecordFailure(cause)
-		if triggered || transient {
+		if !until.IsZero() {
 			entry.Blacklist(until)
 		}
 	}
-	return count, triggered, until, transient
+	return count, triggered, until, kind
 }
 
 func (s *sharedMemberState) recordSuccess() {

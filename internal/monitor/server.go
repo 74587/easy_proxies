@@ -923,9 +923,11 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 				"password":  cfg.MultiPort.Password,
 			}
 			resp["pool"] = map[string]any{
-				"mode":               cfg.Pool.Mode,
-				"failure_threshold":  cfg.Pool.FailureThreshold,
-				"blacklist_duration": cfg.Pool.BlacklistDuration.String(),
+				"mode":                cfg.Pool.Mode,
+				"failure_threshold":   cfg.Pool.FailureThreshold,
+				"blacklist_duration":  cfg.Pool.BlacklistDuration.String(),
+				"transient_cooldown":  cfg.Pool.TransientCooldown.String(),
+				"rate_limit_cooldown": cfg.Pool.RateLimitCooldown.String(),
 			}
 			resp["sticky"] = map[string]any{
 				"enabled": cfg.Sticky.Enabled,
@@ -968,6 +970,8 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 				Mode              string `json:"mode"`
 				FailureThreshold  int    `json:"failure_threshold"`
 				BlacklistDuration string `json:"blacklist_duration"`
+				TransientCooldown string `json:"transient_cooldown"`
+				RateLimitCooldown string `json:"rate_limit_cooldown"`
 			} `json:"pool,omitempty"`
 			Sticky *struct {
 				Enabled bool   `json:"enabled"`
@@ -1044,6 +1048,18 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 				if req.Pool.BlacklistDuration != "" {
 					if d, err := time.ParseDuration(req.Pool.BlacklistDuration); err == nil {
 						s.cfgSrc.Pool.BlacklistDuration = d
+					}
+				}
+				// Invalid or non-positive cooldowns keep the current setting rather
+				// than failing the whole settings update.
+				if req.Pool.TransientCooldown != "" {
+					if d, err := time.ParseDuration(req.Pool.TransientCooldown); err == nil && d > 0 {
+						s.cfgSrc.Pool.TransientCooldown = d
+					}
+				}
+				if req.Pool.RateLimitCooldown != "" {
+					if d, err := time.ParseDuration(req.Pool.RateLimitCooldown); err == nil && d > 0 {
+						s.cfgSrc.Pool.RateLimitCooldown = d
 					}
 				}
 			}

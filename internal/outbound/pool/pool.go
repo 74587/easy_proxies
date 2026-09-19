@@ -43,6 +43,13 @@ type Options struct {
 	Members           []string
 	FailureThreshold  int
 	BlacklistDuration time.Duration
+	// TransientCooldown is how long a member is parked after a transient failure
+	// (timeout / connection reset / 503). Defaults to 60s when <= 0.
+	TransientCooldown time.Duration
+	// RateLimitCooldown is the cooldown applied on HTTP 429. Quota windows are
+	// usually much longer than a network blip, so this is tuned separately.
+	// Falls back to the effective TransientCooldown when <= 0.
+	RateLimitCooldown time.Duration
 	// RetryEnabled toggles automatic fail-over on dial failure.
 	RetryEnabled bool
 	// RetryAttempts is the maximum total dial attempts (including the first).
@@ -182,6 +189,12 @@ func normalizeOptions(options Options) Options {
 	}
 	if options.BlacklistDuration <= 0 {
 		options.BlacklistDuration = 24 * time.Hour
+	}
+	if options.TransientCooldown <= 0 {
+		options.TransientCooldown = defaultTransientCooldown
+	}
+	if options.RateLimitCooldown <= 0 {
+		options.RateLimitCooldown = options.TransientCooldown
 	}
 	if options.RetryAttempts <= 0 {
 		options.RetryAttempts = 3
@@ -610,13 +623,26 @@ func (p *poolOutbound) recordFailure(member *memberState, cause error) {
 		p.logger.Warn("proxy ", member.tag, " failure (no shared state): ", cause)
 		return
 	}
-	failures, blacklisted, until, transient := member.shared.recordFailure(cause, p.options.FailureThreshold, p.options.BlacklistDuration)
+	policy := failurePolicy{
+		Threshold:         p.options.FailureThreshold,
+		BlacklistDuration: p.options.BlacklistDuration,
+		TransientCooldown: p.options.TransientCooldown,
+		RateLimitCooldown: p.options.RateLimitCooldown,
+	}
+	failures, blacklisted, until, kind := member.shared.recordFailure(cause, policy)
 	switch {
-	case transient:
-		// Transient (e.g. 429 rate-limit): short cooldown, not counted toward the
-		// 24h blacklist. The node is retried automatically once the cooldown ends.
-		p.logger.Warn("proxy ", member.tag, " transient failure, cooling down until ", until.Format("15:04:05"), ": ", cause)
-		log.Printf("[pool] %s transient failure, cooldown until %s: %v", member.tag, until.Format("15:04:05"), cause)
+	case kind == faultRateLimit:
+		// Upstream quota exhausted (429): park the node for the rate-limit
+		// cooldown, which is typically far longer than a network blip.
+		cooldown := policy.cooldownFor(faultRateLimit)
+		p.logger.Warn("proxy ", member.tag, " rate-limited (429), cooling down for ", cooldown, " until ", until.Format("15:04:05"), ": ", cause)
+		log.Printf("[pool] %s rate-limited (429), cooldown %s until %s: %v", member.tag, cooldown, until.Format("15:04:05"), cause)
+	case kind == faultTransient:
+		// Transient (timeout / reset / 503): short cooldown, not counted toward
+		// the blacklist. The node is retried automatically once it ends.
+		cooldown := policy.cooldownFor(faultTransient)
+		p.logger.Warn("proxy ", member.tag, " transient failure, cooling down for ", cooldown, " until ", until.Format("15:04:05"), ": ", cause)
+		log.Printf("[pool] %s transient failure, cooldown %s until %s: %v", member.tag, cooldown, until.Format("15:04:05"), cause)
 	case blacklisted:
 		p.logger.Warn("proxy ", member.tag, " blacklisted for ", p.options.BlacklistDuration, ": ", cause)
 		log.Printf("⚠️  [pool] %s BLACKLISTED for %s (until %s): %v", member.tag, p.options.BlacklistDuration, until.Format("15:04:05"), cause)

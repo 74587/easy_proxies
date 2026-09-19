@@ -507,13 +507,21 @@ func (p *poolOutbound) releaseIfAllBlacklistedLocked(now time.Time) bool {
 			return false
 		}
 	}
-	// All blacklisted, force release all
+	// All banned. Clear the permanent blacklists so the pool can recover, but
+	// leave members still serving a transient / rate-limit cooldown parked:
+	// releasing them would hand the request straight back to a node we know is
+	// rate-limited, which is precisely what the cooldown exists to prevent.
+	released := 0
 	for _, member := range p.members {
-		if member.shared != nil {
-			member.shared.forceRelease()
+		if member.shared != nil && member.shared.releaseIfPermanent(now) {
+			released++
 		}
 	}
-	p.logger.Warn("all upstream proxies were blacklisted, releasing them for retry")
+	if released == 0 {
+		p.logger.Debug("all upstream proxies are on cooldown, leaving them parked")
+		return false
+	}
+	p.logger.Warn("all upstream proxies were blacklisted, released ", released, "/", len(p.members), " for retry; any still on cooldown were left parked")
 	return true
 }
 
@@ -644,8 +652,12 @@ func (p *poolOutbound) recordFailure(member *memberState, cause error) {
 		p.logger.Warn("proxy ", member.tag, " transient failure, cooling down for ", cooldown, " until ", until.Format("15:04:05"), ": ", cause)
 		log.Printf("[pool] %s transient failure, cooldown %s until %s: %v", member.tag, cooldown, until.Format("15:04:05"), cause)
 	case blacklisted:
-		p.logger.Warn("proxy ", member.tag, " blacklisted for ", p.options.BlacklistDuration, ": ", cause)
-		log.Printf("⚠️  [pool] %s BLACKLISTED for %s (until %s): %v", member.tag, p.options.BlacklistDuration, until.Format("15:04:05"), cause)
+		// Report the real remaining span, not the configured duration: an
+		// already-running longer ban wins over a fresh one, so `until` can be
+		// further out than BlacklistDuration.
+		remaining := time.Until(until).Round(time.Second)
+		p.logger.Warn("proxy ", member.tag, " blacklisted for ", remaining, ": ", cause)
+		log.Printf("⚠️  [pool] %s BLACKLISTED for %s (until %s): %v", member.tag, remaining, until.Format("15:04:05"), cause)
 		log.Printf("    To release immediately, use WebUI or: POST /api/nodes/%s/release", member.tag)
 	default:
 		p.logger.Warn("proxy ", member.tag, " failure ", failures, "/", p.options.FailureThreshold, ": ", cause)
@@ -784,10 +796,13 @@ func (p *poolOutbound) probeMember(ctx context.Context, member *memberState, des
 	if member.entry != nil {
 		member.entry.RecordSuccessWithLatency(duration)
 	}
-	// Clear pool blacklist on successful probe — a node that passes health check
-	// should be available for selection immediately (fixes #8, #9).
+	// Clear a permanent pool blacklist on successful probe — a node that passes
+	// the health check should be available for selection immediately (fixes #8,
+	// #9). A live transient / rate-limit cooldown is deliberately preserved: the
+	// probe targets a different host than the failing request did, so passing it
+	// says nothing about an exhausted upstream quota.
 	if member.shared != nil {
-		member.shared.forceRelease()
+		member.shared.releaseIfPermanent(time.Now())
 	}
 	return duration, nil
 }

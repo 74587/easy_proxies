@@ -1,6 +1,7 @@
 package pool
 
 import (
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -16,8 +17,13 @@ type sharedMemberState struct {
 	failures         int
 	blacklisted      bool
 	blacklistedUntil time.Time
-	entry            atomic.Pointer[monitor.EntryHandle]
-	active           atomic.Int32
+	// banIsCooldown is true when the ban currently described by blacklisted /
+	// blacklistedUntil is a transient or rate-limit cooldown rather than a
+	// threshold blacklist. Cooldowns must survive the automatic release paths
+	// (see releaseIfPermanent); permanent bans keep their auto-clear behaviour.
+	banIsCooldown bool
+	entry         atomic.Pointer[monitor.EntryHandle]
+	active        atomic.Int32
 }
 
 // failureKind classifies a dial failure so the caller can pick the right
@@ -35,6 +41,16 @@ const (
 // unset, preserving the historical hardcoded behaviour.
 const defaultTransientCooldown = 60 * time.Second
 
+// Status codes must be matched with word-ish boundaries rather than a bare
+// substring: an address like "203.0.113.5:44290" contains "429", and treating
+// that as a rate limit both applied the wrong (long) cooldown and permanently
+// exempted the node from the failure threshold, since cooldowns never
+// accumulate. Ports and dotted quads are excluded via the leading ":." class.
+var (
+	rateLimitCodeRe      = regexp.MustCompile(`(^|[^0-9:.])429([^0-9]|$)`)
+	serviceUnavailCodeRe = regexp.MustCompile(`(^|[^0-9:.])503([^0-9]|$)`)
+)
+
 // classifyFailure buckets err into one of the three failure kinds.
 //
 // Rate-limit markers are checked first: a 429 response body frequently also
@@ -48,7 +64,7 @@ func classifyFailure(err error) failureKind {
 	}
 	msg := strings.ToLower(err.Error())
 	switch {
-	case strings.Contains(msg, "429"),
+	case rateLimitCodeRe.MatchString(msg),
 		strings.Contains(msg, "too many requests"),
 		strings.Contains(msg, "rate limit"),
 		strings.Contains(msg, "ratelimit"),
@@ -61,7 +77,7 @@ func classifyFailure(err error) failureKind {
 		strings.Contains(msg, "temporarily"),
 		strings.Contains(msg, "try again"),
 		strings.Contains(msg, "service unavailable"),
-		strings.Contains(msg, "503"):
+		serviceUnavailCodeRe.MatchString(msg):
 		return faultTransient
 	}
 	return faultPermanent
@@ -168,11 +184,14 @@ func (s *sharedMemberState) recordFailure(cause error, policy failurePolicy) (in
 		// Never let a short cooldown cut an already-running longer ban short:
 		// a 60s transient blip must not release a node mid-way through a 24h
 		// permanent blacklist. Keep whichever expiry is later.
+		cooldown := kind != faultPermanent
 		if s.blacklisted && s.blacklistedUntil.After(until) {
 			until = s.blacklistedUntil
+			cooldown = s.banIsCooldown // the surviving ban keeps its own nature
 		}
 		s.blacklisted = true
 		s.blacklistedUntil = until
+		s.banIsCooldown = cooldown
 	}
 	s.mu.Unlock()
 
@@ -202,6 +221,7 @@ func (s *sharedMemberState) isBlacklisted(now time.Time) bool {
 	if expired {
 		s.blacklisted = false
 		s.blacklistedUntil = time.Time{}
+		s.banIsCooldown = false
 	}
 	blacklisted := s.blacklisted
 	s.mu.Unlock()
@@ -231,16 +251,43 @@ func (s *sharedMemberState) blacklistRemaining(now time.Time) time.Duration {
 	return remaining
 }
 
+// forceRelease unconditionally clears all failure and ban state, cooldowns
+// included. This is the manual path (WebUI / API release): an operator asking
+// for a node back always gets it back.
 func (s *sharedMemberState) forceRelease() {
 	s.mu.Lock()
 	s.failures = 0
 	s.blacklisted = false
 	s.blacklistedUntil = time.Time{}
+	s.banIsCooldown = false
 	s.mu.Unlock()
 
 	if entry := s.entry.Load(); entry != nil {
 		entry.ClearBlacklist()
 	}
+}
+
+// releaseIfPermanent clears the ban unless a cooldown is still running.
+// Transient / rate-limit cooldowns must outlive the automatic release paths
+// (a successful probe against a different host says nothing about an exhausted
+// quota), while permanent bans keep their original auto-clear behaviour.
+// Returns true when state was cleared.
+func (s *sharedMemberState) releaseIfPermanent(now time.Time) bool {
+	s.mu.Lock()
+	if s.blacklisted && s.banIsCooldown && now.Before(s.blacklistedUntil) {
+		s.mu.Unlock()
+		return false
+	}
+	s.failures = 0
+	s.blacklisted = false
+	s.blacklistedUntil = time.Time{}
+	s.banIsCooldown = false
+	s.mu.Unlock()
+
+	if entry := s.entry.Load(); entry != nil {
+		entry.ClearBlacklist()
+	}
+	return true
 }
 
 func (s *sharedMemberState) incActive() {
@@ -275,6 +322,7 @@ func blacklistSharedMember(tag string, duration time.Duration) {
 		state.mu.Lock()
 		state.blacklisted = true
 		state.blacklistedUntil = until
+		state.banIsCooldown = false // an operator-issued ban is not a cooldown
 		state.failures = 0
 		state.mu.Unlock()
 	}

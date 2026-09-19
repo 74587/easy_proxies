@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.1.1] - 2026-09-19
+
+### Fixed
+- **Failure cooldowns were force-released almost immediately, so `rate_limit_cooldown` barely took effect**: the cooldown added in 3.1.0 is stored in the same state as a threshold blacklist, and two pre-existing paths cleared that state without distinguishing the two.
+  - `releaseIfAllBlacklistedLocked` is a last-resort "every member is banned, let them all back in" escape hatch on the request path. In `multi-port`/`hybrid` mode the builder gives each node its own **one-member** pool, so "every member is banned" became trivially true the instant that single member cooled down — the node was released on the very next request and the effective cooldown was ~0
+  - A successful health probe called `forceRelease()`. The sweep runs every 5 minutes over all nodes and probes a different host than the failing request used, so a node whose upstream quota was exhausted still passed and was released — capping any cooldown at ~5 minutes
+  - Live cooldowns now survive both automatic paths. Permanent blacklists keep their original auto-clear behaviour (the #8/#9 fix is preserved), and manual release from the WebUI or `POST /api/nodes/{tag}/release` still clears everything immediately
+  - **Behaviour change**: when every member of a pool is cooling down at once, requests now fail until the earliest cooldown expires instead of being handed back to a node known to be rate-limited. The 60s default keeps this brief; size `rate_limit_cooldown` against your pool accordingly
+- **`"429"` matched inside unrelated numbers**: classification used a bare substring test, so `dial tcp 203.0.113.5:44290: i/o timeout` was treated as rate limiting — applying the long rate-limit cooldown instead of the 60s transient one, and, because cooldowns never increment the failure counter, permanently exempting such a node from the blacklist. Status codes are now matched with digit boundaries (`429` and `503` alike), so ports and dotted quads no longer collide
+- Blacklist log lines printed the configured `blacklist_duration` even when an already-running longer ban won, contradicting the expiry timestamp on the same line; they now print the real remaining span
+
 ## [3.1.0] - 2026-09-19
 
 ### Added

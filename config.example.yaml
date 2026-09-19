@@ -57,6 +57,12 @@ pool:
   # 节点被黑名单后将完全不可用，直到时间到期或手动释放
   # 可通过 WebUI 或 API 手动释放：POST /api/nodes/{tag}/release
   blacklist_duration: 24h
+  # 暂时性故障（超时、连接重置、503）的冷却时间
+  # 这类故障通常会自行恢复，不计入 failure_threshold，只临时跳过该节点，到期自动恢复
+  transient_cooldown: 60s
+  # 429 限流（Too Many Requests）的冷却时间，默认与 transient_cooldown 相同
+  # 共享/免费节点被 CDN 限流时很常见；如需 429 后长时间避开该节点，可设为 2h / 6h 等
+  rate_limit_cooldown: 60s
   # 是否启用代理重试：节点拨号失败后自动切换下一个节点重试
   # 多端口模式下池只有 1 个成员，重试会再次拨同一节点
   retry_enabled: true

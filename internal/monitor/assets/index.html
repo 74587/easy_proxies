@@ -720,7 +720,10 @@
                 </div>
                 <div class="form-group"><label>故障阈值</label><input type="number" id="settingPoolFailure" class="setting-input" min="1" max="100" placeholder="3" /></div>
                 <div class="form-group"><label>黑名单时长</label><input type="text" id="settingPoolBlacklist" class="setting-input" placeholder="24h" /></div>
+                <div class="form-group"><label>暂时性故障冷却</label><input type="text" id="settingPoolTransient" class="setting-input" placeholder="60s" /></div>
+                <div class="form-group"><label>429 限流冷却</label><input type="text" id="settingPoolRateLimit" class="setting-input" placeholder="60s" /></div>
               </div>
+              <div style="font-size: 11px; color: var(--text-muted); padding: 0 16px 12px;">永久性故障（握手/证书/协议失败等）连续达到「故障阈值」后按「黑名单时长」拉黑。暂时性故障（超时、连接重置、503）和 429 限流不计入该阈值，只按对应冷却时间临时跳过该节点，到期自动恢复。支持 30s / 10m / 2h 等格式；想让 429 直接拉黑数小时，把「429 限流冷却」改成 2h 即可。</div>
             </div>
 
             <div class="panel" style="margin-bottom: 16px;">
@@ -1554,6 +1557,8 @@
         document.getElementById('settingPoolMode').value = pl.mode || 'random';
         document.getElementById('settingPoolFailure').value = pl.failure_threshold || 3;
         document.getElementById('settingPoolBlacklist').value = pl.blacklist_duration || '24h';
+        document.getElementById('settingPoolTransient').value = pl.transient_cooldown || '60s';
+        document.getElementById('settingPoolRateLimit').value = pl.rate_limit_cooldown || '60s';
         // Sticky
         const st = d.sticky || {};
         document.getElementById('settingStickyEnabled').checked = !!st.enabled;
@@ -1612,6 +1617,8 @@
         pool_mode: document.getElementById('settingPoolMode').value,
         pool_failure: document.getElementById('settingPoolFailure').value,
         pool_blacklist: document.getElementById('settingPoolBlacklist').value,
+        pool_transient: document.getElementById('settingPoolTransient').value,
+        pool_ratelimit: document.getElementById('settingPoolRateLimit').value,
         sticky_enabled: document.getElementById('settingStickyEnabled').checked,
         sticky_port: document.getElementById('settingStickyPort').value,
         mgmt_listen: document.getElementById('settingMgmtListen').value,
@@ -1678,6 +1685,8 @@
             mode: document.getElementById('settingPoolMode').value,
             failure_threshold: parseInt(document.getElementById('settingPoolFailure').value) || 3,
             blacklist_duration: document.getElementById('settingPoolBlacklist').value || '24h',
+            transient_cooldown: document.getElementById('settingPoolTransient').value || '60s',
+            rate_limit_cooldown: document.getElementById('settingPoolRateLimit').value || '60s',
           },
           sticky: {
             enabled: document.getElementById('settingStickyEnabled').checked,

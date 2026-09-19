@@ -8,7 +8,7 @@
 
 - **Three runtime modes**: `pool` (single-port load balancing), `multi-port` (one port per node), and `hybrid` (both simultaneously)
 - **Wide protocol support**: VLESS, VMess, Trojan, Shadowsocks, Hysteria2, TUIC, AnyTLS, SOCKS5, HTTP/HTTPS
-- **Automatic health checking** with configurable failure thresholds and blacklist duration, plus manual blacklist/release from the dashboard
+- **Automatic health checking** with configurable failure thresholds, blacklist duration, and separate cooldowns for transient (timeout/reset/503) and rate-limit (429) failures, plus manual blacklist/release from the dashboard
 - **Automatic fail-over retry**: when a node's dial fails, the request is retried on another healthy node (configurable attempts)
 - **GeoIP region routing**: classify nodes by country and route traffic through a specific region via a dedicated HTTP proxy endpoint
 - **Sticky sessions**: optional dedicated port that pins each client (by source IP) to a fixed upstream node for a stable egress IP, coexisting with the rotating pool entry
@@ -96,6 +96,8 @@ pool:
   mode: sequential    # sequential / random / balance / latency
   failure_threshold: 3
   blacklist_duration: 24h
+  transient_cooldown: 60s   # cooldown after timeout / connection reset / 503
+  rate_limit_cooldown: 60s  # cooldown after HTTP 429; set e.g. 2h to avoid the node longer
   retry_enabled: true # retry on another node when a dial fails
   retry_attempts: 3   # max total dial attempts per request
 
@@ -429,6 +431,12 @@ docker run --user $(id -u):$(id -g) \
       blacklist_duration: 1h  # Change from default 24h to 1h
     ```
   - Check logs for blacklist events: `docker compose logs | grep "BLACKLISTED"`
+  - **Note**: transient failures (HTTP 429, timeouts, connection resets, 503) never reach the 24h blacklist at all -- they do not count toward `failure_threshold` and instead apply a short cooldown (`transient_cooldown`, default `60s`). If a node is rate-limited often, give 429 its own longer cooldown so the pool skips that node for hours instead of a minute:
+    ```yaml
+    pool:
+      transient_cooldown: 60s   # timeout / connection reset / 503
+      rate_limit_cooldown: 2h   # HTTP 429 -- avoid this node for 2 hours
+    ```
 
 ## Changelog
 

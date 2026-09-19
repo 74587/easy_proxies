@@ -14,7 +14,7 @@ Easy Proxies 是一个基于 sing-box 的代理池管理工具。
   - `config.yaml` 的 `nodes`
   - `nodes_file`（每行一个 URI）
   - `subscriptions`（支持 Base64/纯文本/Clash YAML 解析）
-- 自动健康检查、失败熔断和黑名单恢复。
+- 自动健康检查、失败熔断和黑名单恢复；暂时性故障（超时/连接重置/503）与限流故障（HTTP 429）分别使用可配置的独立冷却时间。
 - 拨号失败自动重试：节点拨号失败时自动切换到另一个健康节点重试（可配置次数）。
 - 端口稳定（multi-port/hybrid）：每个节点按 URI 稳定标识（忽略名称与参数顺序），订阅刷新或重启后保持同一本地端口（持久化到 config.yaml 同目录的 `node_ports.json`）。
 - 粘性代理：可选的独立端口，按来源 IP 把客户端固定绑定到同一上游节点，保持出口 IP 稳定，与轮询的 pool 入口共存（仅 pool/hybrid 模式）。
@@ -71,6 +71,8 @@ pool:
   mode: sequential    # sequential / random / balance / latency
   failure_threshold: 3
   blacklist_duration: 24h
+  transient_cooldown: 60s   # 暂时性故障（超时/连接重置/503）后的冷却时间
+  rate_limit_cooldown: 60s  # HTTP 429 限流后的冷却时间，可设为 2h 以更长时间避开该节点
   retry_enabled: true # 拨号失败时切换到另一节点重试
   retry_attempts: 3   # 每个请求的最大拨号次数
 
@@ -349,6 +351,12 @@ docker run --user $(id -u):$(id -g) \
       blacklist_duration: 1h  # 从默认的 24h 改为 1h
     ```
   - 查看黑名单事件日志：`docker compose logs | grep "BLACKLISTED"`
+  - **说明**：暂时性故障（HTTP 429、超时、连接重置、503）根本不会触发 24 小时黑名单 —— 它们不计入 `failure_threshold` 熔断次数，只会应用一段较短的冷却时间（`transient_cooldown`，默认 `60s`）。如果某些节点经常被限流，可以给 429 单独设置更长的冷却时间，让节点池在数小时内跳过该节点，而不是仅仅一分钟：
+    ```yaml
+    pool:
+      transient_cooldown: 60s   # 超时 / 连接重置 / 503
+      rate_limit_cooldown: 2h   # HTTP 429 限流 —— 2 小时内避开该节点
+    ```
 
 ## 更新日志
 

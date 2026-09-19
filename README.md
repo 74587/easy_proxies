@@ -437,6 +437,9 @@ docker run --user $(id -u):$(id -g) \
       transient_cooldown: 60s   # timeout / connection reset / 503
       rate_limit_cooldown: 2h   # HTTP 429 -- avoid this node for 2 hours
     ```
+    - A node on cooldown is skipped, not blacklisted -- it rejoins the pool automatically once the cooldown expires, with no manual action needed.
+    - If *every* node in a pool is cooling down at once, requests fail until the earliest cooldown expires, rather than falling back to a node known to be rate-limited. Choose `rate_limit_cooldown` with your pool size in mind -- a long value on a small pool means a real outage window.
+    - Manual release (the WebUI 解封 button, or `POST /api/nodes/{tag}/release`) clears a live cooldown immediately if you need the node back right away.
 
 ## Changelog
 

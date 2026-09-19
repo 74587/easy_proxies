@@ -59,8 +59,10 @@ pool:
   blacklist_duration: 24h
   # 暂时性故障（超时、连接重置、503）的冷却时间
   # 这类故障通常会自行恢复，不计入 failure_threshold，只临时跳过该节点，到期自动恢复
+  # 冷却期间该节点不会被选中；若池内所有节点都在冷却，请求会失败而不是继续打限流节点
   transient_cooldown: 60s
-  # 429 限流（Too Many Requests）的冷却时间，默认与 transient_cooldown 相同
+  # 429 限流（Too Many Requests）的冷却时间
+  # 留空则跟随 transient_cooldown（注意：在 WebUI 保存过设置后，该值会被固化写入本文件）
   # 共享/免费节点被 CDN 限流时很常见；如需 429 后长时间避开该节点，可设为 2h / 6h 等
   rate_limit_cooldown: 60s
   # 是否启用代理重试：节点拨号失败后自动切换下一个节点重试

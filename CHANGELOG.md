@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.1.0] - 2026-09-19
+
 ### Added
 - **Stable per-node ports**: in `multi-port`/`hybrid` mode, each node keeps the same local port across subscription refreshes and process restarts
   - Ports are preserved by a stable node identity derived from the URI (ignoring the display name and query-parameter order), so renamed or reordered subscription nodes keep their port
@@ -23,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Removed `start.sh` and `diagnose.sh` helper scripts; `docker compose up -d` (with a directory mount) is now the documented path. README/docs updated to inline the equivalent checks
 
 ### Fixed
+- **GeoIP region selection now works through a proxy request header**: the region could previously only be given as a path/authority prefix (`jp/example.com:443`), which most HTTP clients mangle — `net/http` parses a `CONNECT jp/example.com:443` authority into `URL.Host=jp` + `URL.Path=/example.com:443`, so the region was silently dropped. Clients can now send `X-Easyproxy-Region: jp`, which works identically for plain HTTP requests and CONNECT tunnels; the header is stripped before the request is forwarded upstream, an unknown region returns `400` instead of falling back to the default pool, and the original prefix forms still work (#32) — thanks @xingpingcn
 - **Error messages now match actual mount configuration**: entrypoint.sh error messages previously hardcoded `./data/` paths, causing confusion when using file-mount mode (`-v ./nodes.txt:/etc/easy_proxies/nodes.txt`). Now displays correct fix instructions for both directory-mount and file-mount configurations
 - **Initial/periodic health check hangs, leaving 0 nodes available**: `probeAllNodes` (the startup and periodic sweep) called `probe(ctx)` inline with no hard-timeout guard — a separate path from the batch probe. A protocol dial that ignores `ctx` blocked the worker forever, wedging its semaphore slot; the 32 slots filled up and the sweep stalled, so nodes stayed `initialCheckDone=false` and the dashboard showed 0 available even though manual/batch probes found thousands reachable. Each worker now races the probe against its deadline in a goroutine and always releases its slot within the timeout
 - **Batch probe hangs forever (WebUI frozen at "N/M")**: a probe against a node that stalls (accepts TCP but never responds, or a protocol dial/handshake that ignores context cancellation) could block indefinitely, so the stuck goroutines occupied every semaphore slot and `wg.Wait` never returned — freezing the run (e.g. stuck around 1600/8363). Fixed with two layers: (1) `Probe` now runs the check in its own goroutine and races it against the 10s context deadline, so it always returns even if the underlying dial ignores `ctx`; (2) a connection watchdog force-closes the probe connection when the deadline fires, unwinding the stalled goroutine (some sing-box connection types don't honor `SetDeadline`, so the deadline alone was insufficient)
